@@ -727,7 +727,8 @@ function insertIframe(name, url){
     iframe.id = "unpaywall";
 
     // set a custom name and URL
-    iframe.name = name + "#" + encodeURI(url)
+    var useDarkMode = !!settings.useDarkMode;
+    iframe.name = name + "#" + useDarkMode + "#" + encodeURI(url);
 
     document.documentElement.appendChild(iframe);
     iframeIsInserted = true
@@ -838,21 +839,3 @@ function runWithDelay(){
 }
 
 runWithDelay()
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
