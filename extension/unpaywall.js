@@ -490,6 +490,11 @@ function findDoi(){
         findDoiFromInderScienceOnline,
         findDoiFromCairn,
         findDoiFromEpistemonikos,
+        findDoiFromAcs,
+        findDoiFromAip,
+        findDoiFromRsc,
+        findDoiFromSpringer,
+        findDoiFromWiley
     ]
 
     for (var i=0; i < doiFinderFunctions.length; i++){
@@ -504,93 +509,131 @@ function findDoi(){
 
 function findPdfUrl(){
 
-    // later: massively improve PDF link detection.
+    // Massively improved PDF link detection using a scoring heuristic.
 
     var pdfUrl;
 
-
-    //  look in the <meta> tags
-    // same thing, but look in  <link> tags
-    $("meta").each(function(i, elem){
-        if (elem.name == "citation_pdf_url") {
-            pdfUrl = elem.content
-            return false; // stop iterating, we found what we need
+    // 1. High-confidence: look in the <meta> tags
+    $("meta[name='citation_pdf_url']").each(function(i, elem){
+        if (elem.content) {
+            pdfUrl = elem.content;
+            devLog("found pdf in citation_pdf_url meta tag", pdfUrl);
+            return false; // stop iterating
         }
-    })
-
-    // there are also some links to PDFs in the HTML <head>, in tags
-    // called <link> (not hyperlinks, <link> tags).
+    });
+    if (pdfUrl) return getAbsoluteUrl(pdfUrl);
 
 
-    // look in the markup itself. most of these will be pretty narrowly scoped
-    // to a particular publisher.
+    // 2. High-confidence: look in semantic <link> tags
+    $("link[rel='alternate'][type='application/pdf']").each(function() {
+        var href = $(this).attr("href");
+        if (href) {
+            pdfUrl = href;
+            devLog("found pdf in <link rel=alternate> tag", href);
+            return false; // break
+        }
+    });
+    if (pdfUrl) return getAbsoluteUrl(pdfUrl);
 
-    var $links = $("a")
-    $links.each(function(i, link){
-        // iterate through all the links. returning False stops the loop.
 
-        var $link = $(link)
+    // 3. Heuristic-based search: find all potential links and score them.
+    var candidates = [];
+    $("a[href], embed[src]").each(function() {
+        var $el = $(this);
+        var url = $el.attr("href") || $el.attr("src");
+        if (!url) return;
 
-        // https://www.nature.com/nature/journal/v536/n7617/full/nature19106.html
-        if (/\/nature\/journal(.+?)\/pdf\/(.+?)\.pdf$/.test(link.href)) {
-            pdfUrl = link.href
-            return false
+        var score = 0;
+        var urlLower = url.toLowerCase();
+        var textLower = $el.text().trim().toLowerCase();
+
+        // A. Score based on URL patterns
+        if (urlLower.endsWith('.pdf')) {
+            score += 100; // Very strong signal
+        } else if (urlLower.includes('.pdf?')) {
+            score += 90; // Also very strong
+        } else if (urlLower.includes('/pdf/')) {
+            score += 40;
+        } else if (urlLower.includes('pdfviewer')) {
+            score += 30;
+        } else if (urlLower.includes('/content/pdf/')) {
+            score += 40; // Wiley pattern
         }
 
-        // https://www.nature.com/articles/nmicrobiol201648
-        if (/\/articles\/nmicrobiol\d+\.pdf$/.test(link.href)) {
-            pdfUrl = link.href
-            return false
+        // B. Score based on element attributes
+        if ($el.attr('type') && $el.attr('type').toLowerCase() === 'application/pdf') {
+            score += 100;
+        }
+        if ($el.attr('data-download-content') === 'Article') { // NEJM pattern
+             score += 100;
+        }
+        if ($el.attr('pdfurl')) { // ScienceDirect pattern
+             score += 100;
+             url = $el.attr('pdfurl'); // Use the correct attribute
         }
 
-        // NEJM
-        // open: https://www.nejm.org/doi/10.1056/NEJMc1514294
-        // closed: https://www.nejm.org/doi/full/10.1056/NEJMoa1608368
-        if (link.getAttribute("data-download-content") == "Article") {
-            pdfUrl = link.href
-            return false
-        }
-
-        // Taylor & Francis Online
-        if (myHost == "www.tandfonline.com") {
-            // open: https://www.tandfonline.com/doi/full/10.1080/00031305.2016.1154108
-            // closed: https://www.tandfonline.com/doi/abs/10.1198/tas.2011.11160
-            if (/\/doi\/pdf\/10(.+?)needAccess=true$/i.test(link.href)){
-                pdfUrl = link.href
-                return false
+        // C. Score based on link text
+        if (textLower.length > 0) {
+            if (textLower === 'pdf' || textLower === 'full text pdf') {
+                score += 80;
+            } else if (textLower.includes('pdf')) {
+                score += 30;
+            }
+            if (/(full.text|fulltext|article)/.test(textLower)) {
+                score += 10;
+            }
+            if (/(download|view|open)/.test(textLower)) {
+                score += 5;
+            }
+            // Penalize links that are likely something else
+            if (/(supplement|supporting|figure|author|proof|correction|errata)/.test(textLower)) {
+                score -= 50;
             }
         }
 
-        // Centers for Disease Control
-        if (myHost == "www.cdc.gov") {
-            // open https://www.cdc.gov/mmwr/volumes/65/rr/rr6501e1.htm
-            if (link.classList[0] == "noDecoration" && /\.pdf$/.test(link.href)){
-                pdfUrl = link.href
-                return false
-            }
+        // D. Penalize URLs that are likely not the main article
+        if (/(supplement|figure|correction|author|proof)/.test(urlLower)) {
+            score -= 50;
         }
 
-        // ScienceDirect
-        if (myHost == "www.sciencedirect.com"){
-            // open: https://www.sciencedirect.com/science/article/pii/S0360131517300726
-            if (link.getAttribute("pdfurl")){
-                pdfUrl = link.getAttribute("pdfurl")
-                return false
-            }
-
+        if (score > 50) {
+            candidates.push({ url: url, score: score });
         }
+    });
+
+    if (candidates.length > 0) {
+        // Sort by score descending and pick the best one
+        candidates.sort((a, b) => b.score - a.score);
+        devLog("found PDF candidates", candidates);
+        pdfUrl = candidates[0].url;
+    }
+    if (pdfUrl) return getAbsoluteUrl(pdfUrl);
 
 
-    })
-
-
-    // look in the actual text of the page. has to be done when publishers
-    // hide metadata in JS vars
+    // 4. Final fallback to original publisher-specific regexes for tricky cases.
     // IEEE Explore. always has a pdf link, whether closed or not.
     // finds a pdf: https://ieeexplore.ieee.org/document/7169508/
     var ieeePdf = runRegexOnDoc(/"pdfPath":"(.+?)\.pdf",/, "ieeexplore.ieee.org")
     if (ieeePdf){
         pdfUrl = "https://ieeexplore.ieee.org" + ieeePdf + ".pdf"
+    }
+
+    // Taylor & Francis Online
+    if (!pdfUrl && myHost == "www.tandfonline.com") {
+        $("a").each(function(i, link){
+            if (/\/doi\/pdf\/10(.+?)needAccess=true$/i.test(link.href)){
+                pdfUrl = link.href;
+                return false;
+            }
+        });
+    }
+
+    // Nature articles
+    if (!pdfUrl) {
+        $("a[href*='/articles/'][href$='.pdf']").each(function(i, link){
+            pdfUrl = link.href;
+            return false;
+        });
     }
 
     let absolutePdfUrl = getAbsoluteUrl(pdfUrl)
@@ -654,41 +697,60 @@ function pageSaysPdfIsFree(){
 
 // used by sources that need to check to make sure a link to a PDF
 // really gets you a legit pdf.
+// Tries a HEAD request first for efficiency, then falls back to a partial GET.
 function downloadPdf(pdfUrl){
+    return new Promise(function(resolve, reject){
+        var headXhr = new XMLHttpRequest();
+        headXhr.open("HEAD", pdfUrl, true);
+        headXhr.timeout = 8000; // 8s timeout
+
+        headXhr.onload = function() {
+            if (headXhr.status >= 200 && headXhr.status < 400) {
+                var contentType = headXhr.getResponseHeader("Content-Type");
+                if (contentType && contentType.toLowerCase().includes("pdf")) {
+                    devLog("HEAD check successful, it's a PDF:", pdfUrl);
+                    resolve();
+                } else {
+                    devLog("HEAD check content-type not PDF. Falling back to GET for:", pdfUrl);
+                    downloadPdfViaGet(pdfUrl).then(resolve, reject);
+                }
+            } else {
+                devLog("HEAD request failed with status " + headXhr.status + ". Falling back to GET for:", pdfUrl);
+                downloadPdfViaGet(pdfUrl).then(resolve, reject);
+            }
+        };
+
+        headXhr.onerror = function() {
+            devLog("HEAD request errored. Falling back to GET for:", pdfUrl);
+            downloadPdfViaGet(pdfUrl).then(resolve, reject);
+        };
+        headXhr.ontimeout = headXhr.onerror;
+        headXhr.send();
+    });
+}
+
+// Partial GET request to check Content-Type.
+// This is a fallback for when a HEAD request isn't conclusive.
+function downloadPdfViaGet(pdfUrl) {
     return new Promise(function(resolve, reject){
         var xhr = new XMLHttpRequest()
         xhr.open("GET", pdfUrl, true)
-        xhr.onprogress = function () {
-            var contentType = xhr.getResponseHeader("Content-Type")
-            //devLog("HEADERS:", xhr.getAllResponseHeaders())
+        xhr.timeout = 15000; // a bit longer for GET
 
+        var checkHeaders = function () {
+            var contentType = xhr.getResponseHeader("Content-Type")
             if (contentType){
-                xhr.abort()
-                if (contentType.indexOf("pdf") > -1){
-                    resolve()  // it's a PDF
-                }
-                else {
-                    reject()  // not a PDF
-                }
+                xhr.abort(); // We have the headers, we don't need the rest of the file.
+                if (contentType.toLowerCase().includes("pdf")){ resolve(); } else { reject(); }
             }
         }
-        xhr.onload = xhr.onprogress
-
-        // so it's important to mark this done even if something goes wrong,
-        // or we'll never make a decision to show the Green OA tab even if we find green. Eg:
-        // https://link.springer.com/article/10.1023%2FB%3AMACH.0000011805.60520.fe
-        // redirects to http download server, which throws error (needs to be https).
-        xhr.onerror = function(){
-            reject()  // it's not a pdf
-        }
-        xhr.ontimeout = xhr.onerror
-        xhr.send()
-
-    })
+        xhr.onprogress = checkHeaders;
+        xhr.onload = checkHeaders; // For small files, onprogress might not fire, but onload will.
+        xhr.onerror = function(){ reject(); };
+        xhr.ontimeout = xhr.onerror;
+        xhr.send();
+    });
 }
-
-
-
 
 
 
